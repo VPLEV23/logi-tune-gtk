@@ -3,8 +3,12 @@ mouse.py — D-Bus interface to ratbagd (libratbag daemon).
 
 Provides a thin Python wrapper around the ratbagd D-Bus API so the rest of
 the app never has to speak raw D-Bus directly.
+
+Set LOGI_MOCK=1 in the environment to use fake data for UI development:
+    LOGI_MOCK=1 python3 main.py
 """
 
+import os
 import gi
 gi.require_version("GLib", "2.0")
 from gi.repository import GLib
@@ -20,8 +24,78 @@ RESOLUTION_IFACE  = "org.freedesktop.ratbag1.Resolution"
 BUTTON_IFACE      = "org.freedesktop.ratbag1.Button"
 
 
+# ---------------------------------------------------------------------------
+# Mock layer — active when LOGI_MOCK=1
+# ---------------------------------------------------------------------------
+
+DPI_LIST = [200, 400, 800, 1200, 1600, 2400, 3200, 6400]
+
+class MockResolution:
+    def __init__(self, dpi, active):
+        self._dpi = dpi
+        self.is_active = active
+        self.dpi_list = DPI_LIST
+
+    @property
+    def dpi(self):
+        return (self._dpi, self._dpi)
+
+    @dpi.setter
+    def dpi(self, value):
+        self._dpi = value if isinstance(value, int) else value[0]
+
+
+class MockProfile:
+    def __init__(self, index, active):
+        self.index = index
+        self.is_active = active
+        self.resolutions = [
+            MockResolution(800,  active),
+            MockResolution(1600, False),
+            MockResolution(3200, False),
+        ]
+
+    def set_active(self):
+        pass
+
+    def commit(self):
+        pass
+
+
+class MockMouse:
+    name = "Logitech G502 HERO (mock)"
+    model = "mock-device"
+    report_rate = 500
+    report_rate_list = [125, 250, 500, 1000]
+
+    def __init__(self):
+        self._profiles = [
+            MockProfile(0, active=True),
+            MockProfile(1, active=False),
+            MockProfile(2, active=False),
+        ]
+
+    @property
+    def profiles(self):
+        return self._profiles
+
+    @property
+    def active_profile(self):
+        return next(p for p in self._profiles if p.is_active)
+
+    def set_active_profile(self, index):
+        for p in self._profiles:
+            p.is_active = p.index == index
+
+    def commit(self):
+        pass
+
+
+# ---------------------------------------------------------------------------
+# Real D-Bus layer
+# ---------------------------------------------------------------------------
+
 def _props(bus, obj_path, iface):
-    """Return a dbus.Interface for org.freedesktop.DBus.Properties on obj_path."""
     obj = bus.get_object(RATBAG_BUS_NAME, obj_path)
     return dbus.Interface(obj, "org.freedesktop.DBus.Properties"), obj
 
@@ -43,7 +117,6 @@ class Resolution:
 
     @dpi.setter
     def dpi(self, value):
-        """value: (x, y) tuple or single int (applied to both axes)."""
         if isinstance(value, int):
             value = (value, value)
         self._set("Resolution", dbus.Struct(
@@ -57,7 +130,6 @@ class Resolution:
 
     @property
     def dpi_list(self):
-        """Returns the list of supported DPI values."""
         return list(self._get("ResolutionList"))
 
 
@@ -79,8 +151,7 @@ class Profile:
         return bool(self._get("IsActive"))
 
     def set_active(self):
-        iface = dbus.Interface(self._obj, PROFILE_IFACE)
-        iface.SetActive()
+        dbus.Interface(self._obj, PROFILE_IFACE).SetActive()
 
     @property
     def resolutions(self):
@@ -88,13 +159,10 @@ class Profile:
         return [Resolution(self._bus, str(p)) for p in paths]
 
     def commit(self):
-        iface = dbus.Interface(self._obj, PROFILE_IFACE)
-        iface.Commit()
+        dbus.Interface(self._obj, PROFILE_IFACE).Commit()
 
 
 class Mouse:
-    """Represents a single ratbagd-managed device."""
-
     def __init__(self, bus, path):
         self._bus = bus
         self._props, self._obj = _props(bus, path, DEVICE_IFACE)
@@ -124,13 +192,18 @@ class Mouse:
         return self.profiles[0]
 
     def commit(self):
-        """Persist all pending changes to the device."""
-        iface = dbus.Interface(self._obj, DEVICE_IFACE)
-        iface.Commit()
+        dbus.Interface(self._obj, DEVICE_IFACE).Commit()
 
 
 def list_devices():
-    """Return a list of Mouse objects for every device ratbagd currently sees."""
+    """Return a list of Mouse objects for every device ratbagd currently sees.
+
+    If LOGI_MOCK=1 is set, returns a single MockMouse instead of talking to
+    ratbagd — useful for UI development without a physical device.
+    """
+    if os.environ.get("LOGI_MOCK") == "1":
+        return [MockMouse()]
+
     bus = dbus.SystemBus()
     manager_obj = bus.get_object(RATBAG_BUS_NAME, RATBAG_OBJECT)
     manager_props = dbus.Interface(manager_obj, "org.freedesktop.DBus.Properties")
